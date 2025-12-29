@@ -111,11 +111,39 @@ def get_run_name(train_cfg, vlm_cfg):
 
     return f"nanoVLM_{vit}_{mp}_{llm}_{num_gpus}_{batch_size}_{max_training_steps}_{learning_rate}_{date}"
 
+
+def sync_tokenizer_and_vocab(vlm_cfg):
+    """
+    Align tokenizer selection with config vocab sizes to avoid embedding/head mismatches.
+    """
+    from transformers import AutoConfig as HFAutoConfig, AutoTokenizer as HFAutoTokenizer
+
+    tokenizer_name = vlm_cfg.lm_model_type if vlm_cfg.lm_tokenizer is None else vlm_cfg.lm_tokenizer
+    base_tokenizer = HFAutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
+
+    if vlm_cfg.lm_chat_template is None and getattr(base_tokenizer, "chat_template", None):
+        vlm_cfg.lm_chat_template = base_tokenizer.chat_template
+
+    extra_token_count = len(vlm_cfg.vlm_extra_tokens)
+    base_vocab = len(base_tokenizer)
+    vlm_cfg.extra_token_amount = extra_token_count
+    vlm_cfg.lm_tokenizer = tokenizer_name
+    vlm_cfg.lm_base_vocab_size = max(getattr(vlm_cfg, "lm_base_vocab_size", 0), base_vocab)
+    vlm_cfg.lm_vocab_size = max(getattr(vlm_cfg, "lm_vocab_size", 0), base_vocab + extra_token_count)
+
+    # Align max length with LM config for downstream collators
+    hf_cfg = HFAutoConfig.from_pretrained(vlm_cfg.lm_model_type)
+    if hasattr(hf_cfg, "max_position_embeddings"):
+        vlm_cfg.lm_max_length = getattr(hf_cfg, "max_position_embeddings", vlm_cfg.lm_max_length)
+
+    return get_tokenizer(tokenizer_name, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
+
 def get_dataloaders(train_cfg, vlm_cfg):
     print(f"Getting dataloaders from {train_cfg.train_dataset_path}")
     # Create datasets
     image_processor = get_image_processor(vlm_cfg.max_img_size, vlm_cfg.vit_img_size, vlm_cfg.resize_to_max_side_len)
-    tokenizer = get_tokenizer(vlm_cfg.lm_tokenizer, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
+    tokenizer_name = vlm_cfg.lm_tokenizer or vlm_cfg.lm_model_type
+    tokenizer = get_tokenizer(tokenizer_name, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
 
     dataset_names_to_load = train_cfg.train_dataset_name
     if "shards" in train_cfg.train_dataset_name:
@@ -318,9 +346,9 @@ def train(train_cfg, vlm_cfg):
         for p in list(model.vision_encoder.parameters()):
             p.requires_grad = False
     if train_cfg.lr_language_backbone > 0:
-        param_groups.append({'params': list(model.decoder.parameters()), 'lr': train_cfg.lr_language_backbone})
+        param_groups.append({'params': list(model.lm.parameters()), 'lr': train_cfg.lr_language_backbone})
     else:
-        for p in list(model.decoder.parameters()):
+        for p in list(model.lm.parameters()):
             p.requires_grad = False
 
     optimizer = optim.AdamW(param_groups)
@@ -639,12 +667,21 @@ def main():
     parser.add_argument('--lr_mp', type=float, help='Learning rate for the mapping network')
     parser.add_argument('--lr_vision_backbone', type=float, help='Learning rate for the vision backbone')
     parser.add_argument('--lr_language_backbone', type=float, help='Learning rate for the language backbone')
+    parser.add_argument('--lm_model_type', type=str, help='Hugging Face repo id for the language model backbone')
+    parser.add_argument('--lm_tokenizer', type=str, help='Tokenizer repo id (defaults to lm_model_type if not provided)')
+    parser.add_argument('--lm_chat_template', type=str, help='Override chat template used by the tokenizer')
+    parser.add_argument('--vit_model_type', type=str, help='Hugging Face repo id for the vision backbone')
+    parser.add_argument('--max_img_size', type=int, help='Long-side cap for images before patching (None to disable)')
+    parser.add_argument('--resize_to_max_side_len', action='store_true', help='Force long side to max_img_size (can upsample)')
     parser.add_argument('--vlm_checkpoint_path', type=str, help='Path to the VLM checkpoint for loading or saving')
-    parser.add_argument('--compile', type=bool, help='Use torch.compile to optimize the model')
+    parser.add_argument('--compile', action='store_true', help='Use torch.compile to optimize the model')
     parser.add_argument('--log_wandb', type=bool, help='Log to wandb')
     parser.add_argument('--resume_from_vlm_checkpoint', type=bool, default=False, help='Resume training from VLM checkpoint specified by vlm_checkpoint_path (or default if not provided)')
     parser.add_argument('--no_log_wandb', action='store_true', help='Do not log to wandb')
     parser.add_argument('--train_dataset_path', type=str, help='Train dataset path')
+    parser.add_argument('--batch_size', type=int, help='Per-GPU batch size')
+    parser.add_argument('--gradient_accumulation_steps', type=int, help='Gradient accumulation steps')
+    parser.add_argument('--max_training_steps', type=int, help='Number of optimizer update steps')
     parser.add_argument('--relevance_min_rating', type=int, help='Minimum relevance rating of images per sample')
     parser.add_argument('--image_correspondence_min_rating', type=int, help='Minimum image correspondence rating of images per sample')
     parser.add_argument('--visual_dependency_min_rating', type=int, help='Minimum visual dependency rating of images per sample')
@@ -661,6 +698,18 @@ def main():
         train_cfg.lr_vision_backbone = args.lr_vision_backbone
     if args.lr_language_backbone is not None:
         train_cfg.lr_language_backbone = args.lr_language_backbone
+    if args.lm_model_type is not None:
+        vlm_cfg.lm_model_type = args.lm_model_type
+    if args.lm_tokenizer is not None:
+        vlm_cfg.lm_tokenizer = args.lm_tokenizer
+    if args.lm_chat_template is not None:
+        vlm_cfg.lm_chat_template = args.lm_chat_template
+    if args.vit_model_type is not None:
+        vlm_cfg.vit_model_type = args.vit_model_type
+    if args.max_img_size is not None:
+        vlm_cfg.max_img_size = None if args.max_img_size < 0 else args.max_img_size
+    if args.resize_to_max_side_len:
+        vlm_cfg.resize_to_max_side_len = True
     if args.vlm_checkpoint_path is not None:
         vlm_cfg.vlm_checkpoint_path = args.vlm_checkpoint_path
     if args.compile is not None:
@@ -669,6 +718,12 @@ def main():
         train_cfg.log_wandb = False
     if args.train_dataset_path is not None:
         train_cfg.train_dataset_path = args.train_dataset_path
+    if args.batch_size is not None:
+        train_cfg.batch_size = args.batch_size
+    if args.gradient_accumulation_steps is not None:
+        train_cfg.gradient_accumulation_steps = args.gradient_accumulation_steps
+    if args.max_training_steps is not None:
+        train_cfg.max_training_steps = args.max_training_steps
     if args.relevance_min_rating is not None:
         train_cfg.relevance_min_rating = args.relevance_min_rating
     if args.image_correspondence_min_rating is not None:
@@ -682,6 +737,9 @@ def main():
         train_cfg.resume_from_vlm_checkpoint = True
         # When resuming a full VLM, we don't need to load individual backbone weights from original sources
         vlm_cfg.vlm_load_backbone_weights = False
+
+    # Keep tokenizer/model vocab sizes in sync after overrides
+    sync_tokenizer_and_vocab(vlm_cfg)
 
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         init_dist()

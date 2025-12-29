@@ -19,15 +19,14 @@ class DynamicResize(torch.nn.Module):
     def __init__(
         self,
         patch_size: int,
-        max_side_len: int,
+        max_side_len: int | None,
         resize_to_max_side_len: bool = False,
         interpolation: InterpolationMode = InterpolationMode.BICUBIC,
     ) -> None:
         super().__init__()
         self.p = int(patch_size)
-        self.m = int(max_side_len)
+        self.m = None if max_side_len is None else int(max_side_len)
         self.interpolation = interpolation
-        print(f"Resize to max side len: {resize_to_max_side_len}")
         self.resize_to_max_side_len = resize_to_max_side_len
 
     # ------------------------------------------------------------
@@ -35,10 +34,12 @@ class DynamicResize(torch.nn.Module):
         """Compute target (h, w) divisible by patch_size."""
         long, short = (w, h) if w >= h else (h, w)
 
-        # 1) upscale long side
-        target_long = self.m if self.resize_to_max_side_len else min(self.m, math.ceil(long / self.p) * self.p)
+        if self.m is None:
+            target_long = math.ceil(long / self.p) * self.p
+        else:
+            target_long = self.m if self.resize_to_max_side_len else min(self.m, math.ceil(long / self.p) * self.p)
 
-        # 2) scale factor
+        # scale factor
         scale = target_long / long
 
         # 3) compute short side with ceil → never undershoot

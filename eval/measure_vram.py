@@ -45,7 +45,8 @@ def measure_vram(args, vlm_cfg, train_cfg_defaults):
 
     # --- Dataset Preparation ---
     image_processor = get_image_processor(vlm_cfg.max_img_size, vlm_cfg.vit_img_size)
-    tokenizer = get_tokenizer(vlm_cfg.lm_tokenizer, vlm_cfg.vlm_extra_tokens)
+    tokenizer_name = vlm_cfg.lm_tokenizer or vlm_cfg.lm_model_type
+    tokenizer = get_tokenizer(tokenizer_name, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
 
     dataset_path = train_cfg_defaults.train_dataset_path
     # train_cfg_defaults.train_dataset_name is a list, use the first if not specified

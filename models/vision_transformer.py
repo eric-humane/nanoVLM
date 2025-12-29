@@ -170,82 +170,188 @@ class ViT(nn.Module):
     # Load the model from a pretrained HuggingFace model (we don't want to have to train the Vision Backbone from scratch)
     @classmethod
     def from_pretrained(cls, cfg):
-        from transformers import SiglipVisionConfig
+        from transformers import SiglipVisionConfig, AutoConfig, AutoModel
         from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import EntryNotFoundError
         import safetensors
 
-        hf_config = SiglipVisionConfig.from_pretrained(cfg.vit_model_type)
-        cfg.vit_dropout=hf_config.attention_dropout
-        cfg.vit_hidden_dim=hf_config.hidden_size
-        cfg.vit_img_size=hf_config.image_size
-        cfg.vit_inter_dim=hf_config.intermediate_size
-        cfg.vit_ln_eps=hf_config.layer_norm_eps
-        cfg.vit_n_heads=hf_config.num_attention_heads
-        cfg.vit_n_blocks=hf_config.num_hidden_layers
-        cfg.vit_patch_size=hf_config.patch_size
-        model = cls(cfg)
-        safetensors_file = hf_hub_download(repo_id=cfg.vit_model_type, filename="model.safetensors")
+        hf_base_config = AutoConfig.from_pretrained(cfg.vit_model_type)
 
-        sd = model.state_dict()
-        
-        mapping = {
-            'vision_model.embeddings.patch_embedding.weight': 'patch_embedding.conv.weight',
-            'vision_model.embeddings.patch_embedding.bias': 'patch_embedding.conv.bias',
-            'vision_model.embeddings.position_embedding.weight': 'patch_embedding.position_embedding',
-            'vision_model.post_layernorm.weight': 'layer_norm.weight',
-            'vision_model.post_layernorm.bias': 'layer_norm.bias',
-        }
-        
-        for i in range(cfg.vit_n_blocks):
-            # Layer norms
-            mapping[f'vision_model.encoder.layers.{i}.layer_norm1.weight'] = f'blocks.{i}.ln1.weight'
-            mapping[f'vision_model.encoder.layers.{i}.layer_norm1.bias'] = f'blocks.{i}.ln1.bias'
-            mapping[f'vision_model.encoder.layers.{i}.layer_norm2.weight'] = f'blocks.{i}.ln2.weight'
-            mapping[f'vision_model.encoder.layers.{i}.layer_norm2.bias'] = f'blocks.{i}.ln2.bias'
-            
-            # MLP
-            mapping[f'vision_model.encoder.layers.{i}.mlp.fc1.weight'] = f'blocks.{i}.mlp.fc1.weight'
-            mapping[f'vision_model.encoder.layers.{i}.mlp.fc1.bias'] = f'blocks.{i}.mlp.fc1.bias'
-            mapping[f'vision_model.encoder.layers.{i}.mlp.fc2.weight'] = f'blocks.{i}.mlp.fc2.weight'
-            mapping[f'vision_model.encoder.layers.{i}.mlp.fc2.bias'] = f'blocks.{i}.mlp.fc2.bias'
-            
-            # Output projection
-            mapping[f'vision_model.encoder.layers.{i}.self_attn.out_proj.weight'] = f'blocks.{i}.attn.out_proj.weight'
-            mapping[f'vision_model.encoder.layers.{i}.self_attn.out_proj.bias'] = f'blocks.{i}.attn.out_proj.bias'
-        
-        with safetensors.safe_open(filename=safetensors_file, framework="pt", device="cpu") as f:
-            for hf_key, our_key in mapping.items():
-                if hf_key in f.keys() and our_key in sd:
-                    tensor = f.get_tensor(hf_key)
-                    if tensor.shape == sd[our_key].shape:
-                        sd[our_key].copy_(tensor)
-                    else:
-                        if 'position_embedding' in hf_key:
-                            sd[our_key].copy_(tensor.unsqueeze(0))
-                        else:
-                            print(f"Shape mismatch for {hf_key} -> {our_key}: {tensor.shape} vs {sd[our_key].shape}")
+        def _maybe_set_max_img(img_size):
+            if getattr(cfg, "max_img_size", None) is None or cfg.max_img_size == 2048:
+                cfg.max_img_size = img_size
+
+        class HFVisionAdapter(nn.Module):
+            def __init__(self, model_name, model_type):
+                super().__init__()
+                self.model_type = model_type
+                if model_type in ("clip",):
+                    from transformers import CLIPVisionModel
+                    self.backbone = CLIPVisionModel.from_pretrained(model_name)
                 else:
-                    if hf_key not in f.keys():
-                        print(f"Warning: Key {hf_key} not found in safetensors file")
-                    if our_key not in sd:
-                        print(f"Warning: Key {our_key} not found in model state dict")
+                    self.backbone = AutoModel.from_pretrained(model_name)
+            def forward(self, x):
+                outputs = self.backbone(pixel_values=x, output_hidden_states=False)
+                if hasattr(outputs, "last_hidden_state"):
+                    hidden = outputs.last_hidden_state
+                    if self.model_type == "clip" and hidden.size(1) > 1:
+                        hidden = hidden[:, 1:, :]  # drop CLS token for CLIP
+                    return hidden
+                raise ValueError("Vision backbone did not return last_hidden_state.")
+
+        if hf_base_config.model_type in ("siglip", "siglip_vision_model"):
+            hf_config = SiglipVisionConfig.from_pretrained(cfg.vit_model_type)
+            cfg.vit_dropout=hf_config.attention_dropout
+            cfg.vit_hidden_dim=hf_config.hidden_size
+            cfg.vit_img_size=hf_config.image_size
+            cfg.vit_inter_dim=hf_config.intermediate_size
+            cfg.vit_ln_eps=hf_config.layer_norm_eps
+            cfg.vit_n_heads=hf_config.num_attention_heads
+            cfg.vit_n_blocks=hf_config.num_hidden_layers
+            cfg.vit_patch_size=hf_config.patch_size
+            _maybe_set_max_img(hf_config.image_size)
+            model = cls(cfg)
+            safetensors_file = hf_hub_download(repo_id=cfg.vit_model_type, filename="model.safetensors")
+
+            sd = model.state_dict()
             
-            # Manually handle QKV concatenation since our implementation combines Q, K, V into one
-            for i in range(model.cfg.vit_n_blocks):
-                q_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.q_proj.weight')
-                k_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.k_proj.weight')
-                v_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.v_proj.weight')
+            mapping = {
+                'vision_model.embeddings.patch_embedding.weight': 'patch_embedding.conv.weight',
+                'vision_model.embeddings.patch_embedding.bias': 'patch_embedding.conv.bias',
+                'vision_model.embeddings.position_embedding.weight': 'patch_embedding.position_embedding',
+                'vision_model.post_layernorm.weight': 'layer_norm.weight',
+                'vision_model.post_layernorm.bias': 'layer_norm.bias',
+            }
+            
+            for i in range(cfg.vit_n_blocks):
+                # Layer norms
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm1.weight'] = f'blocks.{i}.ln1.weight'
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm1.bias'] = f'blocks.{i}.ln1.bias'
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm2.weight'] = f'blocks.{i}.ln2.weight'
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm2.bias'] = f'blocks.{i}.ln2.bias'
                 
-                qkv_weight = torch.cat((q_weight, k_weight, v_weight), dim=0)
-                sd[f'blocks.{i}.attn.qkv_proj.weight'].copy_(qkv_weight)
+                # MLP
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc1.weight'] = f'blocks.{i}.mlp.fc1.weight'
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc1.bias'] = f'blocks.{i}.mlp.fc1.bias'
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc2.weight'] = f'blocks.{i}.mlp.fc2.weight'
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc2.bias'] = f'blocks.{i}.mlp.fc2.bias'
                 
-                q_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.q_proj.bias')
-                k_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.k_proj.bias')
-                v_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.v_proj.bias')
+                # Output projection
+                mapping[f'vision_model.encoder.layers.{i}.self_attn.out_proj.weight'] = f'blocks.{i}.attn.out_proj.weight'
+                mapping[f'vision_model.encoder.layers.{i}.self_attn.out_proj.bias'] = f'blocks.{i}.attn.out_proj.bias'
+            
+            with safetensors.safe_open(filename=safetensors_file, framework="pt", device="cpu") as f:
+                for hf_key, our_key in mapping.items():
+                    if hf_key in f.keys() and our_key in sd:
+                        tensor = f.get_tensor(hf_key)
+                        if tensor.shape == sd[our_key].shape:
+                            sd[our_key].copy_(tensor)
+                        else:
+                            if 'position_embedding' in hf_key:
+                                sd[our_key].copy_(tensor.unsqueeze(0))
+                            else:
+                                print(f"Shape mismatch for {hf_key} -> {our_key}: {tensor.shape} vs {sd[our_key].shape}")
+                    else:
+                        if hf_key not in f.keys():
+                            print(f"Warning: Key {hf_key} not found in safetensors file")
+                        if our_key not in sd:
+                            print(f"Warning: Key {our_key} not found in model state dict")
                 
-                qkv_bias = torch.cat((q_bias, k_bias, v_bias), dim=0)
-                sd[f'blocks.{i}.attn.qkv_proj.bias'].copy_(qkv_bias)
-        
-        model.load_state_dict(sd)
-        print(f"Successfully loaded {cfg.vit_model_type} weights from safetensors. Model has {sum(p.numel() for p in model.parameters()):,} parameters.")
-        return model
+                # Manually handle QKV concatenation since our implementation combines Q, K, V into one
+                for i in range(model.cfg.vit_n_blocks):
+                    q_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.q_proj.weight')
+                    k_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.k_proj.weight')
+                    v_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.v_proj.weight')
+                    
+                    qkv_weight = torch.cat((q_weight, k_weight, v_weight), dim=0)
+                    sd[f'blocks.{i}.attn.qkv_proj.weight'].copy_(qkv_weight)
+                    
+                    q_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.q_proj.bias')
+                    k_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.k_proj.bias')
+                    v_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.v_proj.bias')
+                    
+                    qkv_bias = torch.cat((q_bias, k_bias, v_bias), dim=0)
+                    sd[f'blocks.{i}.attn.qkv_proj.bias'].copy_(qkv_bias)
+            
+            model.load_state_dict(sd)
+            print(f"Successfully loaded {cfg.vit_model_type} weights from safetensors. Model has {sum(p.numel() for p in model.parameters()):,} parameters.")
+            return model
+        elif hf_base_config.model_type in ("clip", "vit"):
+            # CLIP/ViT-style mapping into our nano-ViT
+            cfg.vit_dropout=getattr(hf_base_config, "attention_dropout", cfg.vit_dropout)
+            cfg.vit_hidden_dim=getattr(hf_base_config, "hidden_size", cfg.vit_hidden_dim)
+            cfg.vit_img_size=getattr(hf_base_config, "image_size", cfg.vit_img_size)
+            cfg.vit_inter_dim=getattr(hf_base_config, "intermediate_size", cfg.vit_inter_dim)
+            cfg.vit_ln_eps=getattr(hf_base_config, "layer_norm_eps", cfg.vit_ln_eps)
+            cfg.vit_n_heads=getattr(hf_base_config, "num_attention_heads", cfg.vit_n_heads)
+            cfg.vit_n_blocks=getattr(hf_base_config, "num_hidden_layers", cfg.vit_n_blocks)
+            cfg.vit_patch_size=getattr(hf_base_config, "patch_size", cfg.vit_patch_size)
+            _maybe_set_max_img(getattr(hf_base_config, "image_size", cfg.max_img_size))
+            model = cls(cfg)
+            try:
+                safetensors_file = hf_hub_download(repo_id=cfg.vit_model_type, filename="model.safetensors")
+            except EntryNotFoundError:
+                print(f"No safetensors weights for {cfg.vit_model_type}; falling back to AutoModel vision adapter.")
+                return HFVisionAdapter(cfg.vit_model_type, hf_base_config.model_type)
+
+            sd = model.state_dict()
+            mapping = {
+                'vision_model.embeddings.patch_embedding.weight': 'patch_embedding.conv.weight',
+                'vision_model.embeddings.patch_embedding.bias': 'patch_embedding.conv.bias',
+                'vision_model.embeddings.position_embedding.weight': 'patch_embedding.position_embedding',
+                'vision_model.post_layernorm.weight': 'layer_norm.weight',
+                'vision_model.post_layernorm.bias': 'layer_norm.bias',
+            }
+            for i in range(cfg.vit_n_blocks):
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm1.weight'] = f'blocks.{i}.ln1.weight'
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm1.bias'] = f'blocks.{i}.ln1.bias'
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm2.weight'] = f'blocks.{i}.ln2.weight'
+                mapping[f'vision_model.encoder.layers.{i}.layer_norm2.bias'] = f'blocks.{i}.ln2.bias'
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc1.weight'] = f'blocks.{i}.mlp.fc1.weight'
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc1.bias'] = f'blocks.{i}.mlp.fc1.bias'
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc2.weight'] = f'blocks.{i}.mlp.fc2.weight'
+                mapping[f'vision_model.encoder.layers.{i}.mlp.fc2.bias'] = f'blocks.{i}.mlp.fc2.bias'
+                mapping[f'vision_model.encoder.layers.{i}.self_attn.out_proj.weight'] = f'blocks.{i}.attn.out_proj.weight'
+                mapping[f'vision_model.encoder.layers.{i}.self_attn.out_proj.bias'] = f'blocks.{i}.attn.out_proj.bias'
+            with safetensors.safe_open(filename=safetensors_file, framework="pt", device="cpu") as f:
+                for hf_key, our_key in mapping.items():
+                    if hf_key in f.keys() and our_key in sd:
+                        tensor = f.get_tensor(hf_key)
+                        if hf_key.endswith(("q_proj.weight", "k_proj.weight", "v_proj.weight")):
+                            continue
+                        if tensor.shape == sd[our_key].shape:
+                            sd[our_key].copy_(tensor)
+                        else:
+                            if 'position_embedding' in hf_key:
+                                sd[our_key].copy_(tensor.unsqueeze(0))
+                            else:
+                                print(f"Shape mismatch for {hf_key} -> {our_key}: {tensor.shape} vs {sd[our_key].shape}")
+                # Manually handle QKV concatenation since our implementation combines Q, K, V into one
+                for i in range(model.cfg.vit_n_blocks):
+                    if f'vision_model.encoder.layers.{i}.self_attn.q_proj.weight' in f.keys():
+                        q_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.q_proj.weight')
+                        k_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.k_proj.weight')
+                        v_weight = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.v_proj.weight')
+                        qkv_weight = torch.cat((q_weight, k_weight, v_weight), dim=0)
+                        sd[f'blocks.{i}.attn.qkv_proj.weight'].copy_(qkv_weight)
+                    if f'vision_model.encoder.layers.{i}.self_attn.q_proj.bias' in f.keys():
+                        q_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.q_proj.bias')
+                        k_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.k_proj.bias')
+                        v_bias = f.get_tensor(f'vision_model.encoder.layers.{i}.self_attn.v_proj.bias')
+                        qkv_bias = torch.cat((q_bias, k_bias, v_bias), dim=0)
+                        sd[f'blocks.{i}.attn.qkv_proj.bias'].copy_(qkv_bias)
+            model.load_state_dict(sd, strict=False)
+            print(f"Loaded {cfg.vit_model_type} weights into nano ViT (CLIP/ViT mapping). Model has {sum(p.numel() for p in model.parameters()):,} parameters.")
+            return model
+        else:
+            cfg.vit_dropout=getattr(hf_base_config, "attention_dropout", cfg.vit_dropout)
+            cfg.vit_hidden_dim=getattr(hf_base_config, "hidden_size", cfg.vit_hidden_dim)
+            cfg.vit_img_size=getattr(hf_base_config, "image_size", cfg.vit_img_size)
+            cfg.vit_inter_dim=getattr(hf_base_config, "intermediate_size", cfg.vit_inter_dim)
+            cfg.vit_ln_eps=getattr(hf_base_config, "layer_norm_eps", cfg.vit_ln_eps)
+            cfg.vit_n_heads=getattr(hf_base_config, "num_attention_heads", cfg.vit_n_heads)
+            cfg.vit_n_blocks=getattr(hf_base_config, "num_hidden_layers", cfg.vit_n_blocks)
+            cfg.vit_patch_size=getattr(hf_base_config, "patch_size", cfg.vit_patch_size)
+            _maybe_set_max_img(getattr(hf_base_config, "image_size", cfg.max_img_size))
+            print(f"Using AutoModel vision backbone for {cfg.vit_model_type}.")
+            return HFVisionAdapter(cfg.vit_model_type, hf_base_config.model_type)

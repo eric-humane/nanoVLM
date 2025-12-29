@@ -61,7 +61,8 @@ def main():
         print(f"VRAM used after loading model: {model_vram_mb:.2f} MB")
 
     # Get tokenizer and image processor from model config if not provided
-    tokenizer = get_tokenizer(model.cfg.lm_tokenizer, model.cfg.vlm_extra_tokens, model.cfg.lm_chat_template)
+    tokenizer_name = model.cfg.lm_tokenizer or model.cfg.lm_model_type
+    tokenizer = get_tokenizer(tokenizer_name, model.cfg.vlm_extra_tokens, model.cfg.lm_chat_template)
     resize_to_max_side_len = False
     if hasattr(model.cfg, "resize_to_max_side_len"):
         resize_to_max_side_len = model.cfg.resize_to_max_side_len

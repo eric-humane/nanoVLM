@@ -7,7 +7,6 @@ from typing import Optional
 
 from models.utils import top_k_top_p_filtering
 from models.vision_transformer import ViT
-from models.language_model import LanguageModel
 from models.modality_projector import ModalityProjector
 from models.config import VLMConfig
 
@@ -17,21 +16,37 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from safetensors.torch import load_model, save_model
+from transformers import AutoModelForCausalLM, AutoConfig
 
 class VisionLanguageModel(nn.Module):
     def __init__(self, cfg: VLMConfig, load_backbone=True):
         super().__init__()
         self.cfg = cfg
+        if self.cfg.lm_tokenizer is None:
+            self.cfg.lm_tokenizer = self.cfg.lm_model_type
+        if getattr(self.cfg, "max_img_size", None) is None:
+            self.cfg.max_img_size = self.cfg.vit_img_size
+        self.tokenizer = get_tokenizer(cfg.lm_tokenizer, cfg.vlm_extra_tokens, cfg.lm_chat_template)
+        if self.cfg.lm_chat_template is None and getattr(self.tokenizer, "chat_template", None):
+            self.cfg.lm_chat_template = self.tokenizer.chat_template
         if load_backbone:
             print("Loading from backbone weights")
             self.vision_encoder = ViT.from_pretrained(cfg)
-            self.decoder = LanguageModel.from_pretrained(cfg)
+            self.lm = AutoModelForCausalLM.from_pretrained(cfg.lm_model_type)
         else:
             self.vision_encoder = ViT(cfg)
-            self.decoder = LanguageModel(cfg)
+            lm_config = AutoConfig.from_pretrained(cfg.lm_model_type)
+            self.lm = AutoModelForCausalLM.from_config(lm_config)
+        cfg.lm_hidden_dim = self.lm.config.hidden_size
+        # Update vision hidden dim from backbone config when available (important for adapters)
+        if hasattr(self.vision_encoder, "backbone") and hasattr(self.vision_encoder.backbone, "config"):
+            cfg.vit_hidden_dim = getattr(self.vision_encoder.backbone.config, "hidden_size", cfg.vit_hidden_dim)
+        # Resize LM embeddings to include added tokens
+        self.lm.resize_token_embeddings(len(self.tokenizer))
+        if self.lm.config.is_encoder_decoder:
+            raise ValueError("Encoder-decoder models are not supported; please choose a decoder-only causal LM.")
         self.MP = ModalityProjector(cfg)
         self.load_backbone = load_backbone
-        self.tokenizer = get_tokenizer(cfg.lm_tokenizer, cfg.vlm_extra_tokens, cfg.lm_chat_template)
 
     def _replace_img_tokens_with_embd(self, input_ids, token_embd, image_embd):
         """
@@ -44,6 +59,13 @@ class VisionLanguageModel(nn.Module):
 
         # Build a mask of all image-token positions: shape [B, T_seq]
         mask = (input_ids == self.tokenizer.image_token_id)
+        if mask.sum() == 0:
+            return updated_token_embd
+
+        flat_image_tokens = image_embd.view(-1, image_embd.size(-1)).to(updated_token_embd.dtype)
+        if flat_image_tokens.size(0) != mask.sum():
+            # If counts don't line up (e.g., random ids in tests), skip replacement for safety
+            return updated_token_embd
         updated_token_embd[mask] = image_embd.view(-1, image_embd.size(-1)).to(updated_token_embd.dtype) # torch flattens before assigning
 
         return updated_token_embd
@@ -61,53 +83,56 @@ class VisionLanguageModel(nn.Module):
 
     def forward(self, input_ids, images, attention_mask=None, targets=None):
         images_tensor = self._process_images(images, input_ids.device)
-        token_embd = self.decoder.token_embedding(input_ids) # [B, T_sequence, D_lm]
+        token_embd = self.lm.get_input_embeddings()(input_ids) # [B, T_sequence, D_lm]
 
         if images_tensor is not None:
             image_embd = self.vision_encoder(images_tensor)
+            if image_embd.size(-1) != self.cfg.vit_hidden_dim:
+                raise ValueError(f"Vision encoder hidden dim {image_embd.size(-1)} does not match cfg.vit_hidden_dim {self.cfg.vit_hidden_dim}.")
             image_embd = self.MP(image_embd)  # [num_images, mp_image_token_length, D_lm]
             token_embd = self._replace_img_tokens_with_embd(input_ids, token_embd, image_embd)
 
-        logits, _ = self.decoder(token_embd, attention_mask=attention_mask)
+        outputs = self.lm(
+            inputs_embeds=token_embd,
+            attention_mask=attention_mask,
+            labels=targets
+        )
 
-        loss = None
-        if targets is not None:
-            logits = self.decoder.head(logits) # Apply LM head
-            # Loss is calculated over all tokens, but `targets` (labels) will have -100 for non-answer tokens.
-            # No need to slice logits based on image embedding size here, as the target mask handles it.
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100)
+        logits = outputs.logits
+        loss = outputs.loss if targets is not None else None
 
         return logits, loss
 
     @torch.inference_mode()
-    def generate(self, input_ids, images, attention_mask=None, max_new_tokens=5, top_k=50, top_p=0.9, temperature=0.5, greedy=False):
+    def generate(self, input_ids, images, attention_mask=None, max_new_tokens=5, top_k=50, top_p=0.9, temperature=0.5, greedy=False, use_kv_cache=True):
         images_tensor = self._process_images(images, input_ids.device)
-        token_embd = self.decoder.token_embedding(input_ids) # [B, T_prompt_text, D_lm]
+        token_embd = self.lm.get_input_embeddings()(input_ids) # [B, T_prompt_text, D_lm]
+        full_embeds = token_embd
 
         if images_tensor is not None:
             # 1. Process image if present
             image_embd = self.vision_encoder(images_tensor) # [B, T_img_feat, D_model]
+            if image_embd.size(-1) != self.cfg.vit_hidden_dim:
+                raise ValueError(f"Vision encoder hidden dim {image_embd.size(-1)} does not match cfg.vit_hidden_dim {self.cfg.vit_hidden_dim}.")
             image_embd = self.MP(image_embd)      # [B, mp_image_token_length, D_lm]
             # 2. Combine image and text embeddings
             token_embd = self._replace_img_tokens_with_embd(input_ids, token_embd, image_embd)
+            full_embeds = token_embd
 
-        current_total_seq_len = token_embd.size(1)
-        batch_size = input_ids.size(0) # Or token_embd.size(0)
+        current_total_seq_len = full_embeds.size(1)
+        batch_size = input_ids.size(0)
         
         # --- Multimodal Prefill Phase ---
-        prefill_output, kv_cache_list = self.decoder(
-            token_embd,
-            attention_mask=attention_mask, # Use the provided attention mask
-            kv_cache=None,
-            start_pos=0
+        kv_cache_list = None
+        prefill_output = self.lm(
+            inputs_embeds=full_embeds,
+            attention_mask=attention_mask,
+            use_cache=True,
+            past_key_values=None
         )
         
-        last_token_output_from_prefill = prefill_output[:, -1, :] 
-        
-        if not self.decoder.lm_use_tokens:
-            current_logits = self.decoder.head(last_token_output_from_prefill) 
-        else:
-            current_logits = last_token_output_from_prefill 
+        current_logits = prefill_output.logits[:, -1, :]
+        kv_cache_list = prefill_output.past_key_values
 
         # Store newly generated token IDs
         newly_generated_ids_list = []
@@ -124,31 +149,34 @@ class VisionLanguageModel(nn.Module):
             newly_generated_ids_list.append(next_token_id)
             
             # Embed the newly generated token
-            next_token_embed = self.decoder.token_embedding(next_token_id) # [B, 1, D_lm]
+            next_token_embed = self.lm.get_input_embeddings()(next_token_id) # [B, 1, D_lm]
             
-            # The start_pos for the new token is the current total sequence length *before* adding this new token
-            current_token_start_pos = current_total_seq_len
-            current_total_seq_len += 1
-
             # update attention mask
             if attention_mask is not None:
                 attention_mask = torch.cat((attention_mask, torch.ones((batch_size, 1), device=attention_mask.device, dtype=attention_mask.dtype)), dim=1)
 
-            # With KV cache: only process the new token
-            decode_step_output, kv_cache_list = self.decoder(
-                next_token_embed,
-                attention_mask=attention_mask,
-                kv_cache=kv_cache_list,
-                start_pos=current_token_start_pos
-            )
-      
-            last_token_output = decode_step_output[:, -1, :] 
-            
-            # Apply head to get logits (if model is in embedding mode)
-            if not self.decoder.lm_use_tokens:
-                current_logits = self.decoder.head(last_token_output)
+            if use_kv_cache:
+                current_total_seq_len += 1
+
+                decode_step_output = self.lm(
+                    inputs_embeds=next_token_embed,
+                    attention_mask=attention_mask,
+                    past_key_values=kv_cache_list,
+                    use_cache=True
+                )
+                kv_cache_list = decode_step_output.past_key_values
+                last_token_output = decode_step_output.logits[:, -1, :] 
             else:
-                current_logits = last_token_output
+                full_embeds = torch.cat((full_embeds, next_token_embed), dim=1)
+                decode_step_output = self.lm(
+                    inputs_embeds=full_embeds,
+                    attention_mask=attention_mask,
+                    use_cache=False
+                )
+                last_token_output = decode_step_output.logits[:, -1, :]
+                current_total_seq_len = full_embeds.size(1)
+
+            current_logits = last_token_output
         
         if not newly_generated_ids_list: # Handle case where max_new_tokens might be 0
             return torch.empty((batch_size,0), dtype=torch.long, device=input_ids.device)

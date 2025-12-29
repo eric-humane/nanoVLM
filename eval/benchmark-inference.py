@@ -20,7 +20,8 @@ if __name__ == "__main__":
     model = VisionLanguageModel.from_pretrained("lusxvr/nanoVLM-450M").to(device)
     model.eval()
 
-    tokenizer = get_tokenizer(model.cfg.lm_tokenizer, model.cfg.vlm_extra_tokens)
+    tokenizer_name = model.cfg.lm_tokenizer or model.cfg.lm_model_type
+    tokenizer = get_tokenizer(tokenizer_name, model.cfg.vlm_extra_tokens, model.cfg.lm_chat_template)
     image_processor = get_image_processor(model.cfg.max_img_size, model.cfg.vit_img_size)
 
     text = "What is this?"

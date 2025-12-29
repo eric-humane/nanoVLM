@@ -23,7 +23,7 @@
 
 ---
 
-nanoVLM is the simplest repository for training/finetuning a small sized Vision-Language Model with a lightweight implementation in pure PyTorch. The code itself is very readable and approachable, the model consists of a Vision Backbone (`models/vision_transformer.py` ~150 lines), Language Decoder (`models/language_model.py` ~250 lines), Modality Projection (`models/modality_projection.py` ~50 lines) and the VLM itself (`models/vision_language_model.py` ~100 lines) and a simple training loop (`train.py` ~200 lines).
+nanoVLM is the simplest repository for training/finetuning a small sized Vision-Language Model with a lightweight implementation in pure PyTorch. The code itself is very readable and approachable: Vision Backbone (`models/vision_transformer.py`), Modality Projection (`models/modality_projection.py`), an HF causal LM via `AutoModelForCausalLM` (`models/vision_language_model.py`), and a simple training loop (`train.py`).
 
 Similar to Andrej Karpathy's nanoGPT, we wanted to equip the community with a very simple implementation and training script for Vision Language Models. We do not claim this to be a new SOTA model, rather an educational effort that packs quite a bit of punch if you have the right hardware! You should be able to tweak and play around with the code in no time.
 
@@ -109,6 +109,36 @@ Generation 3:  This is a cat sitting on the ground, which is of white and brown 
 Generation 4:  This is a cat sitting on the ground. I think this is a cat sitting on the ground.
 Generation 5:  This is a cat sitting on the ground, which is covered with a mat. I think this is
 ```
+
+## Bring-your-own backbones (LM + ViT)
+
+nanoVLM can mix any HF causal LM with any HF ViT-like encoder. Tokenizer and vocab auto-derive from the LM; image size/patch size auto-derive from the vision config. New flags:
+- `--lm_model_type` (defaults to SmolLM2) and `--lm_tokenizer` (defaults to LM repo)
+- `--vit_model_type` for the vision encoder
+- `--max_img_size` (cap long side; use `-1` to disable) and `--resize_to_max_side_len` (force exact cap, even upscaling)
+- `--batch_size`, `--gradient_accumulation_steps`, `--max_training_steps` to fit memory
+
+Examples:
+- SigLIP2 + FunctionGemma preset: `bash train_functiongemma_siglip2.sh`
+- Qwen2.5-7B + SigLIP2-SO400M:  
+  `python train.py --lm_model_type Qwen/Qwen2.5-7B-Instruct --vit_model_type google/siglip2-so400m-patch16-384 --batch_size 1 --gradient_accumulation_steps 16 --max_img_size 384`
+- Llama-3-8B + custom ViT:  
+  `python train.py --lm_model_type meta-llama/Meta-Llama-3-8B-Instruct --vit_model_type google/vit-base-patch16-224 --max_img_size 224 --batch_size 1 --gradient_accumulation_steps 16`  
+  (Non-SigLIP vision backbones load via CLIP/ViT mapping or AutoModel; fine-tune recommended.)
+
+Checks and safeguards:
+- Vocab and tokenizer resize automatically to include VLM special tokens.
+- Vision hidden dim is validated before the modality projector; mismatches raise a clear error.
+- `max_img_size` defaults to the vision config’s `image_size` unless overridden.
+- Vision loading: SigLIP backbones use a custom weight mapping into the nano ViT; CLIP/ViT backbones also map weights into nano ViT; other vision backbones fall back to `AutoModel` and feed `last_hidden_state` to the modality projector. Patch size/image size/hidden dim come from the HF vision config automatically.
+- Language loading uses `AutoModelForCausalLM`; embeddings are resized to fit added special tokens and are used directly for generation/training.
+- For vision grids that aren’t square/divisible by `mp_pixel_shuffle_factor`, set `mp_pixel_shuffle_factor=1` to avoid pixel-shuffle asserts.
+- LM support: decoder-only causal LMs only; encoder-decoder models are not supported.
+
+### Future considerations
+- Add more vision mappers (e.g., EVA/ConvNext) to reuse weights directly.
+- Auto-detect and remap non-RoPE/attention variants on the LM side, or add a pure `AutoModelForCausalLM` passthrough mode.
+- Expand presets/recipes for common backbone pairs with tested batch/accumulation settings.
 
 ### Evaluation with lmms-eval
 

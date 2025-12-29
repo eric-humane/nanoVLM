@@ -47,7 +47,8 @@ class NanoVLMWrapper(lmms):
             self._world_size = 1
         
         # Get tokenizer and image processor from model config if not provided
-        self.tokenizer = get_tokenizer(self.model.cfg.lm_tokenizer, self.model.cfg.vlm_extra_tokens, self.model.cfg.lm_chat_template)
+        tokenizer_name = self.model.cfg.lm_tokenizer or self.model.cfg.lm_model_type
+        self.tokenizer = get_tokenizer(tokenizer_name, self.model.cfg.vlm_extra_tokens, self.model.cfg.lm_chat_template)
         resize_to_max_side_len = False
         if hasattr(self.model.cfg, "resize_to_max_side_len"):
             resize_to_max_side_len = self.model.cfg.resize_to_max_side_len

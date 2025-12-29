@@ -33,6 +33,7 @@ from data.processors import get_image_processor, get_tokenizer
 
 import models.config as config
 from models.vision_language_model import VisionLanguageModel
+from models.vision_transformer import hydrate_vision_cfg_from_timm
 
 #Otherwise, the tokenizer will throw a warning
 import os
@@ -290,6 +291,13 @@ def get_lr(it, max_lr, max_steps):
     return min_lr + coeff * (max_lr - min_lr)
 
 def train(train_cfg, vlm_cfg):
+    try:
+        used_name = hydrate_vision_cfg_from_timm(vlm_cfg)
+        if is_master():
+            print(f"Vision backbone '{used_name}' -> img_size {vlm_cfg.vit_img_size}, patch {vlm_cfg.vit_patch_size}, hidden {vlm_cfg.vit_hidden_dim}")
+    except Exception as e:
+        raise ValueError(f"Failed to hydrate vision config from timm model '{vlm_cfg.vit_model_type}': {e}") from e
+
     train_loader, val_loader, iter_train_loader, iter_val_loader = get_dataloaders(train_cfg, vlm_cfg)
 
     if is_dist():
@@ -512,12 +520,6 @@ def train(train_cfg, vlm_cfg):
                         save_model = model.module if is_dist() else model # unwrap the model for saving if DDP
                         save_model.save_pretrained(save_directory=checkpoint_path_step)
 
-                        if train_cfg.use_lmms_eval and global_step % (train_cfg.eval_interval*2) == 0:
-                            # Submit evaluation job
-                            cmd = f"sbatch eval.slurm {checkpoint_path_step} {global_step} {run_name} {train_cfg.lmms_eval_limit} {train_cfg.lmms_eval_tasks} {train_cfg.lmms_eval_batch_size}"
-                            print(f"Submitting evaluation job: {cmd}")
-                            subprocess.run(cmd, shell=True)
-
                     if avg_val_loss < best_val_loss:
                         best_val_loss = avg_val_loss
                         if is_master():
@@ -671,6 +673,8 @@ def main():
     parser.add_argument('--lm_tokenizer', type=str, help='Tokenizer repo id (defaults to lm_model_type if not provided)')
     parser.add_argument('--lm_chat_template', type=str, help='Override chat template used by the tokenizer')
     parser.add_argument('--vit_model_type', type=str, help='Hugging Face repo id for the vision backbone')
+    parser.add_argument('--vit_pretrained', action='store_true', help='Load timm vision backbone with pretrained weights')
+    parser.add_argument('--no_vit_pretrained', action='store_true', help='Instantiate timm vision backbone without pretrained weights')
     parser.add_argument('--max_img_size', type=int, help='Long-side cap for images before patching (None to disable)')
     parser.add_argument('--resize_to_max_side_len', action='store_true', help='Force long side to max_img_size (can upsample)')
     parser.add_argument('--vlm_checkpoint_path', type=str, help='Path to the VLM checkpoint for loading or saving')
@@ -682,6 +686,7 @@ def main():
     parser.add_argument('--batch_size', type=int, help='Per-GPU batch size')
     parser.add_argument('--gradient_accumulation_steps', type=int, help='Gradient accumulation steps')
     parser.add_argument('--max_training_steps', type=int, help='Number of optimizer update steps')
+    parser.add_argument('--mp_pixel_shuffle_factor', type=int, help='Pixel shuffle factor for modality projector (1 to bypass)')
     parser.add_argument('--relevance_min_rating', type=int, help='Minimum relevance rating of images per sample')
     parser.add_argument('--image_correspondence_min_rating', type=int, help='Minimum image correspondence rating of images per sample')
     parser.add_argument('--visual_dependency_min_rating', type=int, help='Minimum visual dependency rating of images per sample')
@@ -706,6 +711,10 @@ def main():
         vlm_cfg.lm_chat_template = args.lm_chat_template
     if args.vit_model_type is not None:
         vlm_cfg.vit_model_type = args.vit_model_type
+    if args.vit_pretrained:
+        vlm_cfg.vit_pretrained = True
+    if args.no_vit_pretrained:
+        vlm_cfg.vit_pretrained = False
     if args.max_img_size is not None:
         vlm_cfg.max_img_size = None if args.max_img_size < 0 else args.max_img_size
     if args.resize_to_max_side_len:
@@ -724,6 +733,8 @@ def main():
         train_cfg.gradient_accumulation_steps = args.gradient_accumulation_steps
     if args.max_training_steps is not None:
         train_cfg.max_training_steps = args.max_training_steps
+    if args.mp_pixel_shuffle_factor is not None:
+        vlm_cfg.mp_pixel_shuffle_factor = args.mp_pixel_shuffle_factor
     if args.relevance_min_rating is not None:
         train_cfg.relevance_min_rating = args.relevance_min_rating
     if args.image_correspondence_min_rating is not None:

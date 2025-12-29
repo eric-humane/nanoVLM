@@ -3,7 +3,6 @@ import os
 import json
 import torch
 from models.vision_language_model import VisionLanguageModel
-import models.config as config
 
 def main():
     parser = argparse.ArgumentParser(description="Run lmms-eval on a model checkpoint.")
@@ -11,7 +10,7 @@ def main():
     parser.add_argument('--global_step', type=int, help="Global step at which the checkpoint was saved.")
     parser.add_argument('--run_name', type=str, help="The name of the training run.")
 
-    # These arguments are based on TrainConfig, passed from the eval.slurm script
+    # These arguments are based on TrainConfig; useful for local/CI eval runs
     parser.add_argument('--tasks', type=str, default='mmstar,mmmu,ocrbench,textvqa', help='Tasks for lmms-eval, comma-separated.')
     parser.add_argument('--limit', type=int, default=None, help='Limit for lmms-eval.')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for lmms-eval.')

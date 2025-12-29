@@ -24,19 +24,19 @@ class VisionLanguageModel(nn.Module):
         self.cfg = cfg
         if self.cfg.lm_tokenizer is None:
             self.cfg.lm_tokenizer = self.cfg.lm_model_type
-        if getattr(self.cfg, "max_img_size", None) is None:
-            self.cfg.max_img_size = self.cfg.vit_img_size
         self.tokenizer = get_tokenizer(cfg.lm_tokenizer, cfg.vlm_extra_tokens, cfg.lm_chat_template)
         if self.cfg.lm_chat_template is None and getattr(self.tokenizer, "chat_template", None):
             self.cfg.lm_chat_template = self.tokenizer.chat_template
         if load_backbone:
             print("Loading from backbone weights")
-            self.vision_encoder = ViT.from_pretrained(cfg)
+            self.vision_encoder = ViT.from_pretrained(cfg, pretrained=self.cfg.vit_pretrained)
             self.lm = AutoModelForCausalLM.from_pretrained(cfg.lm_model_type)
         else:
-            self.vision_encoder = ViT(cfg)
+            self.vision_encoder = ViT.from_pretrained(cfg, pretrained=False)
             lm_config = AutoConfig.from_pretrained(cfg.lm_model_type)
             self.lm = AutoModelForCausalLM.from_config(lm_config)
+        if getattr(self.cfg, "max_img_size", None) in (None, 2048, -1):
+            self.cfg.max_img_size = self.cfg.vit_img_size
         cfg.lm_hidden_dim = self.lm.config.hidden_size
         # Update vision hidden dim from backbone config when available (important for adapters)
         if hasattr(self.vision_encoder, "backbone") and hasattr(self.vision_encoder.backbone, "config"):
@@ -226,16 +226,15 @@ class VisionLanguageModel(nn.Module):
         # If local folder exists => load from there
         if os.path.exists(repo_id_or_path):
             config_path = os.path.join(repo_id_or_path, "config.json")
-            weights_path = os.path.join(repo_id_or_path, "model.safetensors")
-
+            weights_path = os.path.join(repo_id_or_path, "model.pt")
             if not os.path.exists(config_path):
                 raise ValueError(
                     f"Config file not found at {config_path}. Please provide a valid path."
                 )
+            # Weights optional for adapter-only loads; warn if missing
             if not os.path.exists(weights_path):
-                raise ValueError(
-                    f"Weights file not found at {weights_path}. Please provide a valid path."
-                )
+                print(f"Warning: weights file not found at {weights_path}, loading config only.")
+                weights_path = None
         # Otherwise, assume it's a Hugging Face Hub repo
         else:
             from huggingface_hub import hf_hub_download
@@ -243,9 +242,13 @@ class VisionLanguageModel(nn.Module):
             config_path = hf_hub_download(
                 repo_id=repo_id_or_path, filename="config.json", revision=revision
             )
-            weights_path = hf_hub_download(
-                repo_id=repo_id_or_path, filename="model.safetensors", revision=revision
-            )
+            try:
+                weights_path = hf_hub_download(
+                    repo_id=repo_id_or_path, filename="model.pt", revision=revision
+                )
+            except Exception:
+                print("Warning: model.pt not found on Hub; loading config only.")
+                weights_path = None
 
         # Load config
         with open(config_path, "r") as f:
@@ -254,8 +257,15 @@ class VisionLanguageModel(nn.Module):
         # Initialize model without loading the backbone
         model = cls(cfg, load_backbone=False)
 
-        # Load safetensors weights
-        load_model(model, weights_path)
+        # Load weights
+        if weights_path:
+            state = torch.load(weights_path, map_location="cpu")
+            if "vision_encoder" in state and hasattr(model.vision_encoder, "load_state_dict"):
+                model.vision_encoder.load_state_dict(state["vision_encoder"], strict=False)
+            if "MP" in state:
+                model.MP.load_state_dict(state["MP"], strict=False)
+            if "lm" in state:
+                model.lm.load_state_dict(state["lm"], strict=False)
 
         # Done!
         return model
@@ -274,8 +284,12 @@ class VisionLanguageModel(nn.Module):
         with open(os.path.join(save_directory, "config.json"), "w") as f:
             f.write(json.dumps(asdict(self.cfg), indent=4))
 
-        # Save weights as safetensors
-        save_model(self, os.path.join(save_directory, "model.safetensors"))
+        # Save weights: vision encoder (ours or adapter), MP, and LM
+        torch.save({
+            "vision_encoder": self.vision_encoder.state_dict(),
+            "MP": self.MP.state_dict(),
+            "lm": self.lm.state_dict()
+        }, os.path.join(save_directory, "model.pt"))
 
     def push_to_hub(self, repo_id: str, private: bool = False) -> None:
         """

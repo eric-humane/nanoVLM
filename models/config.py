@@ -13,6 +13,7 @@ class VLMConfig:
     vit_ln_eps: float = 1e-6
     vit_cls_flag: bool = False
     vit_model_type: str = 'google/siglip2-base-patch16-512'
+    vit_pretrained: bool = True
 
     lm_hidden_dim: int = 960
     lm_inter_dim: int = 2560

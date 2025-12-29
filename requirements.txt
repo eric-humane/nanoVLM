@@ -1,0 +1,20 @@
+# Core training/runtime
+torch
+torchvision
+timm
+numpy
+pillow
+datasets
+huggingface-hub
+transformers
+safetensors
+wandb
+einops
+tqdm
+pandas
+accelerate
+loguru
+pyyaml
+
+# Evaluation
+lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git

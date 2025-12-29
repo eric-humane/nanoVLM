@@ -25,8 +25,15 @@ class ModalityProjector(nn.Module):
         seq_root = int(seq**0.5)
         if self.scale_factor == 1:
             return x
-        assert seq_root**2 == seq # Sequence length must be a perfect square for pixel shuffle
-        assert seq_root % self.scale_factor == 0 # Sequence root must be divisible by scale factor
+        if seq_root**2 != seq:
+            raise ValueError(
+                f"Pixel shuffle requires a square token grid; got seq_len={seq}. "
+                "Set mp_pixel_shuffle_factor=1 for non-square grids."
+            )
+        if seq_root % self.scale_factor != 0:
+            raise ValueError(
+                f"Pixel shuffle scale_factor={self.scale_factor} incompatible with grid side {seq_root}."
+            )
 
         height = width = seq_root
         x = x.view(bsz, height, width, embed_dim)

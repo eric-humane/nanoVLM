@@ -8,16 +8,15 @@ class TestVisionLanguageModel(unittest.TestCase):
     def setUp(self):
         # Minimal config for testing VLM
         self.cfg = VLMConfig(
-            vit_model_type="hf-internal-testing/tiny-random-clip",
-            vit_patch_size=2,
-            vit_img_size=30,
-            max_img_size=30,
+            vit_model_type="vit_tiny_patch16_224",
+            vit_pretrained=False,
             lm_model_type="hf-internal-testing/tiny-random-gpt2",
             mp_pixel_shuffle_factor=1,
         )
 
         self.model = VisionLanguageModel(self.cfg, load_backbone=True) # Load tiny pretrained backbones
         self.model.eval() # Set model to evaluation mode
+        self.vision_size = self.model.cfg.vit_img_size
 
     def test_generate_kv_caching_consistency(self):
         batch_size = 16
@@ -25,7 +24,7 @@ class TestVisionLanguageModel(unittest.TestCase):
         max_new_tokens = 16 # Generate a few tokens
 
         # Dummy image (Batch, Channels, Height, Width)
-        image_input = torch.randn(batch_size, 3, self.cfg.vit_img_size, self.cfg.vit_img_size)
+        image_input = torch.randn(batch_size, 3, self.vision_size, self.vision_size)
         # Dummy prompt input_ids
         vocab_size = len(self.model.tokenizer)
         prompt_ids = torch.randint(0, vocab_size, (batch_size, prompt_seq_len))

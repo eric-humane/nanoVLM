@@ -2,27 +2,6 @@
 
 ![nanoVLM](assets/nanoVLM.png)
 
-<a target="_blank" href="https://colab.research.google.com/github/huggingface/nanoVLM/blob/main/nanoVLM.ipynb">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a>
-
----
-
-> [!TIP]
-> We have written a [tutorial on nanoVLM](https://huggingface.co/blog/nanovlm) which will guide you through the repository and help you get started in no time.
-
----
-
-> [!NOTE]
-> We have pushed some more breaking changes on September 9, 2025. These are all the updates to use image splitting and train on multiple nodes. This was used for the ablations of the FineVision release. Some things in the codebase regarding support scripts (eg. the notebook, or memory evals) are propably not working anymore. Similarly to the older trained versions of nanoVLM (similarly to Note below). If you find something that doesn't work anymore please let us know in the Issues or submit a PR!
-
----
-
-> [!NOTE]
-> We have pushed some breaking changes to the repository on June 4, 2025. To enable us to do smarter packing, we refactored the way image and text embeddings are combined. To keep everything as smooth as possible, we have trained a new nanoVLM-450M with this new pipeline, while leaving the old nanoVLM-222M compatible with the old pipeline If you clone this repository now or pull the updated to your local machine, the default will be the new 450M Model. If you would like a simpler understanding and a simpler codebase, you can use the v0.1 release. This works out of the box with the old 222M model.
-
----
-
 nanoVLM is the simplest repository for training/finetuning a small sized Vision-Language Model with a lightweight implementation in pure PyTorch. The code itself is very readable and approachable: Vision Backbone (`models/vision_transformer.py`), Modality Projection (`models/modality_projection.py`), an HF causal LM via `AutoModelForCausalLM` (`models/vision_language_model.py`), and a simple training loop (`train.py`).
 
 Similar to Andrej Karpathy's nanoGPT, we wanted to equip the community with a very simple implementation and training script for Vision Language Models. We do not claim this to be a new SOTA model, rather an educational effort that packs quite a bit of punch if you have the right hardware! You should be able to tweak and play around with the code in no time.
@@ -39,10 +18,16 @@ It is therefore a simple yet powerful platform to get started with VLMs. Perfect
 
 ## Quick Start
 
-You can either clone the repository, setup an environment and start with the scripts, or directly [open in Colab](https://colab.research.google.com/github/huggingface/nanoVLM/blob/main/nanoVLM.ipynb). You can also use the [interactive notebook](./nanoVLM.ipynb) to get started!
+You can either clone the repository, set up an environment, and start with the scripts.
 
 
 ## Environment Setup
+
+Fast path:
+```bash
+pip install -r requirements.txt
+# For GPU, install torch/torchvision following https://pytorch.org/get-started/locally/ if you need a specific CUDA wheel.
+```
 
 We really like `uv` and recommend using it as your package manager. But feel free to use whichever you prefer.
 
@@ -68,13 +53,8 @@ pip install torch numpy torchvision pillow datasets huggingface-hub transformers
 
 ```
 Dependencies: 
-- `torch` <3
-- `numpy` <3
-- `torchvision` for the image processors
-- `pillow` for image loading
-- `datasets` for the training datasets
-- `huggingface-hub` & `transformers` to load the pretrained backbones
-- `wandb` for logging
+- `torch` <3 (install the CUDA build if you want GPU training)
+- `numpy`, `torchvision`, `pillow`, `datasets`, `huggingface-hub`, `transformers`, `wandb`, `safetensors`, `einops`
 
 ## Training
 
@@ -112,33 +92,29 @@ Generation 5:  This is a cat sitting on the ground, which is covered with a mat.
 
 ## Bring-your-own backbones (LM + ViT)
 
-nanoVLM can mix any HF causal LM with any HF ViT-like encoder. Tokenizer and vocab auto-derive from the LM; image size/patch size auto-derive from the vision config. New flags:
-- `--lm_model_type` (defaults to SmolLM2) and `--lm_tokenizer` (defaults to LM repo)
-- `--vit_model_type` for the vision encoder
-- `--max_img_size` (cap long side; use `-1` to disable) and `--resize_to_max_side_len` (force exact cap, even upscaling)
-- `--batch_size`, `--gradient_accumulation_steps`, `--max_training_steps` to fit memory
+nanoVLM pairs any HF decoder-only causal LM with any timm vision backbone (including `hf-hub:` repos). Tokenizer/chat template derive from the LM; patch size, image size, hidden dim, and max image cap derive from the timm backbone. Key flags:
+- `--lm_model_type` (defaults to SmolLM2), `--lm_tokenizer`/`--lm_chat_template` (override if you need a different tokenizer)
+- `--vit_model_type` (timm name or `hf-hub:repo`), `--vit_pretrained/--no_vit_pretrained`
+- `--max_img_size` (defaults to the vision input size; set `-1` to disable capping) and `--resize_to_max_side_len` (force an exact cap, even upscaling)
+- `--batch_size`, `--gradient_accumulation_steps`, `--max_training_steps` to fit memory; `--mp_pixel_shuffle_factor` (set to 1 for non-square grids)
 
 Examples:
 - SigLIP2 + FunctionGemma preset: `bash train_functiongemma_siglip2.sh`
 - Qwen2.5-7B + SigLIP2-SO400M:  
-  `python train.py --lm_model_type Qwen/Qwen2.5-7B-Instruct --vit_model_type google/siglip2-so400m-patch16-384 --batch_size 1 --gradient_accumulation_steps 16 --max_img_size 384`
-- Llama-3-8B + custom ViT:  
-  `python train.py --lm_model_type meta-llama/Meta-Llama-3-8B-Instruct --vit_model_type google/vit-base-patch16-224 --max_img_size 224 --batch_size 1 --gradient_accumulation_steps 16`  
-  (Non-SigLIP vision backbones load via CLIP/ViT mapping or AutoModel; fine-tune recommended.)
+  `python train.py --lm_model_type Qwen/Qwen2.5-7B-Instruct --vit_model_type timm/ViT-SO400M-16-SigLIP2-384 --batch_size 1 --gradient_accumulation_steps 16`
+- Llama-3-8B + ViT:  
+  `python train.py --lm_model_type meta-llama/Meta-Llama-3-8B-Instruct --vit_model_type vit_base_patch16_224 --batch_size 1 --gradient_accumulation_steps 16 --mp_pixel_shuffle_factor 1`
 
-Checks and safeguards:
-- Vocab and tokenizer resize automatically to include VLM special tokens.
-- Vision hidden dim is validated before the modality projector; mismatches raise a clear error.
-- `max_img_size` defaults to the vision config’s `image_size` unless overridden.
-- Vision loading: SigLIP backbones use a custom weight mapping into the nano ViT; CLIP/ViT backbones also map weights into nano ViT; other vision backbones fall back to `AutoModel` and feed `last_hidden_state` to the modality projector. Patch size/image size/hidden dim come from the HF vision config automatically.
-- Language loading uses `AutoModelForCausalLM`; embeddings are resized to fit added special tokens and are used directly for generation/training.
-- For vision grids that aren’t square/divisible by `mp_pixel_shuffle_factor`, set `mp_pixel_shuffle_factor=1` to avoid pixel-shuffle asserts.
-- LM support: decoder-only causal LMs only; encoder-decoder models are not supported.
+Safeguards:
+- Tokenizer/embedding resize auto-includes VLM special tokens; vocab size comes from the LM tokenizer.
+- Vision config (image size, patch size, hidden dim) hydrates from timm before dataloaders; mismatches raise clear errors.
+- Vision loading is timm-only (no custom weight remapping); pass a timm model name or `hf-hub:` repo that timm supports.
+- Pixel shuffle raises if the grid is incompatible; set `mp_pixel_shuffle_factor=1` for non-square tokens.
+- Decoder-only LMs only; encoder-decoder models are not supported.
 
 ### Future considerations
-- Add more vision mappers (e.g., EVA/ConvNext) to reuse weights directly.
-- Auto-detect and remap non-RoPE/attention variants on the LM side, or add a pure `AutoModelForCausalLM` passthrough mode.
-- Expand presets/recipes for common backbone pairs with tested batch/accumulation settings.
+- Add family-specific vision mappers (e.g., CLIP/SigLIP/EVA) to reuse native checkpoints without custom heads.
+- Auto-detect LM variants (attention/RoPE) for safer adapter-only finetuning and add more tested presets/recipes.
 
 ### Evaluation with lmms-eval
 
@@ -193,7 +169,7 @@ Once you've trained a **nanoVLM** model, you might want to share it on the Huggi
 model.push_to_hub("my-awesome-nanovlm-model")
 ```
 
-The model will be saved on the Hub as a config file `config.json` and a weights file `model.safetensors`. A modelcard `README.md` will also be generated for you with some high-level information. Feel free to update it manually to explain your work.
+The model will be saved on the Hub as a config file `config.json` and a weights file `model.pt`. A modelcard `README.md` will also be generated for you with some high-level information. Feel free to update it manually to explain your work.
 
 If the repo does not exist, it will be created for you. By default the repo will be public. You can pass `private=True` if you don't want to share publicly.
 

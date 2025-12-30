@@ -14,7 +14,6 @@ from data.processors import get_tokenizer
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoConfig
 
 class VisionLanguageModel(nn.Module):

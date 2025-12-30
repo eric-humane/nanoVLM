@@ -5,7 +5,7 @@ set -euo pipefail
 # Adjust batch size / accumulation to fit your GPU memory.
 python train.py \
   --lm_model_type google/functiongemma-270m-it \
-  --vit_model_type timm/ViT-SO400M-16-SigLIP2-384 \
+  --vit_model_type vit_so400m_patch16_siglip_384 \
   --batch_size 1 \
   --gradient_accumulation_steps 16 \
   --lr_language_backbone 5e-5 \

@@ -101,7 +101,7 @@ nanoVLM pairs any HF decoder-only causal LM with any timm vision backbone (inclu
 Examples:
 - SigLIP2 + FunctionGemma preset: `bash train_functiongemma_siglip2.sh`
 - Qwen2.5-7B + SigLIP2-SO400M:  
-  `python train.py --lm_model_type Qwen/Qwen2.5-7B-Instruct --vit_model_type timm/ViT-SO400M-16-SigLIP2-384 --batch_size 1 --gradient_accumulation_steps 16`
+  `python train.py --lm_model_type Qwen/Qwen2.5-7B-Instruct --vit_model_type vit_so400m_patch16_siglip_384 --batch_size 1 --gradient_accumulation_steps 16`
 - Llama-3-8B + ViT:  
   `python train.py --lm_model_type meta-llama/Meta-Llama-3-8B-Instruct --vit_model_type vit_base_patch16_224 --batch_size 1 --gradient_accumulation_steps 16 --mp_pixel_shuffle_factor 1`
 

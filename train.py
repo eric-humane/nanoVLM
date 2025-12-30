@@ -291,12 +291,13 @@ def get_lr(it, max_lr, max_steps):
     return min_lr + coeff * (max_lr - min_lr)
 
 def train(train_cfg, vlm_cfg):
-    try:
-        used_name = hydrate_vision_cfg_from_timm(vlm_cfg)
-        if is_master():
-            print(f"Vision backbone '{used_name}' -> img_size {vlm_cfg.vit_img_size}, patch {vlm_cfg.vit_patch_size}, hidden {vlm_cfg.vit_hidden_dim}")
-    except Exception as e:
-        raise ValueError(f"Failed to hydrate vision config from timm model '{vlm_cfg.vit_model_type}': {e}") from e
+    if not train_cfg.resume_from_vlm_checkpoint:
+        try:
+            used_name = hydrate_vision_cfg_from_timm(vlm_cfg)
+            if is_master():
+                print(f"Vision backbone '{used_name}' -> img_size {vlm_cfg.vit_img_size}, patch {vlm_cfg.vit_patch_size}, hidden {vlm_cfg.vit_hidden_dim}")
+        except Exception as e:
+            raise ValueError(f"Failed to hydrate vision config from timm model '{vlm_cfg.vit_model_type}': {e}") from e
 
     train_loader, val_loader, iter_train_loader, iter_val_loader = get_dataloaders(train_cfg, vlm_cfg)
 
@@ -696,6 +697,15 @@ def main():
 
     vlm_cfg = config.VLMConfig()
     train_cfg = config.TrainConfig()
+
+    # If resuming, preload the saved VLM config before applying overrides
+    if args.resume_from_vlm_checkpoint and args.vlm_checkpoint_path:
+        import json as _json
+        cfg_path = os.path.join(args.vlm_checkpoint_path, "config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r") as f:
+                saved_cfg = config.VLMConfig(**_json.load(f))
+            vlm_cfg = saved_cfg
 
     if args.lr_mp is not None:
         train_cfg.lr_mp = args.lr_mp

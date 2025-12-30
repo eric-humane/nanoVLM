@@ -54,7 +54,7 @@ pip install torch numpy torchvision pillow datasets huggingface-hub transformers
 ```
 Dependencies: 
 - `torch` <3 (install the CUDA build if you want GPU training)
-- `numpy`, `torchvision`, `pillow`, `datasets`, `huggingface-hub`, `transformers`, `wandb`, `safetensors`, `einops`
+- `numpy`, `torchvision`, `pillow`, `datasets`, `huggingface-hub`, `transformers`, `wandb`, `einops`
 
 ## Training
 

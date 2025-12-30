@@ -7,7 +7,6 @@ pillow
 datasets
 huggingface-hub
 transformers
-safetensors
 wandb
 einops
 tqdm

@@ -15,7 +15,7 @@ def parse_args():
         description="Generate text from an image with nanoVLM")
     parser.add_argument(
         "--checkpoint", type=str, default=None,
-        help="Path to a local checkpoint (directory or safetensors/pth). If omitted, we pull from HF."
+        help="Path to a local checkpoint directory (config.json + model.pt). If omitted, we pull from HF."
     )
     parser.add_argument(
         "--hf_model", type=str, default="lusxvr/nanoVLM-230M-8k",
